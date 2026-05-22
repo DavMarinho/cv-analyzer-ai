@@ -1,10 +1,10 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import google.generativeai as genai
 from pypdf import PdfReader
 import io
 import time
 import re
+import json
 
 # ── Configuração da página ─────────────────────────────────────────
 st.set_page_config(
@@ -13,40 +13,6 @@ st.set_page_config(
     layout="centered",
     initial_sidebar_state="collapsed",
 )
-
-# ── localStorage helper ────────────────────────────────────────────
-def load_api_key_from_storage():
-    """Injeta JS que lê o localStorage e envia pro Streamlit via query param."""
-    components.html("""
-        <script>
-            const key = localStorage.getItem('cv_analyzer_api_key');
-            if (key) {
-                const url = new URL(window.parent.location.href);
-                if (!url.searchParams.get('api_key_loaded')) {
-                    url.searchParams.set('_api_key', key);
-                    url.searchParams.set('api_key_loaded', '1');
-                    window.parent.history.replaceState({}, '', url);
-                    window.parent.location.reload();
-                }
-            }
-        </script>
-    """, height=0)
-
-def save_api_key_to_storage(api_key: str):
-    """Salva a chave no localStorage via JS."""
-    safe_key = api_key.replace("'", "\\'")
-    components.html(f"""
-        <script>
-            localStorage.setItem('cv_analyzer_api_key', '{safe_key}');
-        </script>
-    """, height=0)
-
-def clear_api_key_from_storage():
-    components.html("""
-        <script>
-            localStorage.removeItem('cv_analyzer_api_key');
-        </script>
-    """, height=0)
 
 # ── Textos (PT / EN) ───────────────────────────────────────────────
 TEXTS = {
@@ -78,7 +44,6 @@ TEXTS = {
         "section_summary": "📋 Resumo Geral",
         "pages_info": "✓ {} página(s) lidas",
         "footer": "Feito por Davi Marinho · Gemini API",
-
     },
     "en": {
         "title": "📄 CV Analyzer AI",
@@ -107,7 +72,7 @@ TEXTS = {
         "section_keywords": "🔑 Missing Keywords",
         "section_summary": "📋 General Summary",
         "pages_info": "✓ {} page(s) read",
-        "footer": "Built by David Marinho + Gemini API ·",
+        "footer": "Built by Davi Marinho · Gemini API",
     },
 }
 
@@ -161,7 +126,6 @@ MAX_PAGES = 5
 MAX_SIZE_MB = 5
 
 def extract_pdf_text(file_bytes: bytes) -> tuple[str, int]:
-    """Extrai texto do PDF. Retorna (texto, num_paginas)."""
     reader = PdfReader(io.BytesIO(file_bytes))
     num_pages = len(reader.pages)
     text = ""
@@ -170,16 +134,13 @@ def extract_pdf_text(file_bytes: bytes) -> tuple[str, int]:
     return text.strip(), num_pages
 
 def call_gemini(api_key: str, prompt: str) -> dict:
-    """Chama a API Gemini e retorna o JSON parseado."""
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-2.5-flash")
     response = model.generate_content(prompt)
     raw = response.text.strip()
-    # remove possíveis backticks de markdown
     raw = re.sub(r"^```json\s*", "", raw)
     raw = re.sub(r"^```\s*", "", raw)
     raw = re.sub(r"\s*```$", "", raw)
-    import json
     return json.loads(raw)
 
 def score_color(score: int) -> str:
@@ -199,14 +160,14 @@ def render_score(score: int, label: str):
     </div>
     """, unsafe_allow_html=True)
 
-def render_list(items: list, emoji: str = "•"):
+def render_list(items: list):
     for item in items:
         st.markdown(f"- {item}")
 
-# ── Rate limiting simples (por sessão) ────────────────────────────
+# ── Rate limiting ──────────────────────────────────────────────────
 RATE_LIMIT_SECONDS = 30
 
-def check_rate_limit(t: dict) -> tuple[bool, int]:
+def check_rate_limit() -> tuple[bool, int]:
     last = st.session_state.get("last_analysis_time", 0)
     elapsed = time.time() - last
     if elapsed < RATE_LIMIT_SECONDS:
@@ -225,13 +186,6 @@ def main():
     st.markdown(f"## {t['title']}")
     st.markdown(f"<p style='color:#888;margin-top:-12px;margin-bottom:24px'>{t['subtitle']}</p>", unsafe_allow_html=True)
 
-    # ── Recupera chave do localStorage via query params ───────────────
-    params = st.query_params
-    if "_api_key" in params and not st.session_state.get("api_key"):
-        st.session_state["api_key"] = params["_api_key"]
-        st.session_state["api_key_saved"] = True
-        st.query_params.clear()
-
     # ── API Key ────────────────────────────────────────────────────
     saved_key = st.session_state.get("api_key", "")
     with st.expander("🔑 API Key", expanded=not saved_key):
@@ -242,24 +196,8 @@ def main():
             help=f"{t['api_help']} → aistudio.google.com",
             value=saved_key,
         )
-        col_save, col_clear = st.columns([3, 1])
-        with col_save:
-            if st.button("💾 Salvar chave no navegador", use_container_width=True):
-                if api_key:
-                    st.session_state["api_key"] = api_key
-                    st.session_state["api_key_saved"] = True
-                    save_api_key_to_storage(api_key)
-                    st.success("Chave salva! Não precisará digitar novamente neste navegador.")
-        with col_clear:
-            if st.button("🗑️ Limpar", use_container_width=True):
-                st.session_state["api_key"] = ""
-                st.session_state["api_key_saved"] = False
-                clear_api_key_from_storage()
-                st.rerun()
-
-    # tenta carregar do localStorage se não tiver na sessão
-    if not st.session_state.get("api_key"):
-        load_api_key_from_storage()
+        if api_key:
+            st.session_state["api_key"] = api_key
 
     # ── Upload PDF ─────────────────────────────────────────────────
     uploaded = st.file_uploader(
@@ -272,7 +210,6 @@ def main():
     if uploaded:
         file_bytes = uploaded.read()
         size_mb = len(file_bytes) / (1024 * 1024)
-
         if size_mb > MAX_SIZE_MB:
             st.error(t["error_size"])
         else:
@@ -288,7 +225,7 @@ def main():
             except Exception:
                 st.error(t["error_pdf"])
 
-    # ── Job description ────────────────────────────────────────────
+    # ── Descrição da vaga ──────────────────────────────────────────
     job_text = st.text_area(
         t["job_label"],
         placeholder=t["job_placeholder"],
@@ -299,29 +236,26 @@ def main():
     if st.button(t["analyze_btn"], type="primary", use_container_width=True):
         api_key = st.session_state.get("api_key", "").strip()
 
-        # validações
         if not api_key:
             st.error(t["error_api"])
             st.stop()
         if not cv_text:
-            st.error(t["error_pdf"] if uploaded else t["error_pdf"])
+            st.error(t["error_pdf"])
             st.stop()
         if not job_text.strip():
             st.error(t["error_job"])
             st.stop()
 
-        # rate limit
-        ok, wait = check_rate_limit(t)
+        ok, wait = check_rate_limit()
         if not ok:
             st.warning(t["rate_limit"].format(wait))
             st.stop()
 
-        # chamada API
         with st.spinner(t["analyzing"]):
             try:
                 prompt_template = PROMPT_PT if lang == "PT" else PROMPT_EN
                 prompt = prompt_template.format(
-                    cv_text=cv_text[:6000],   # limite de tokens
+                    cv_text=cv_text[:6000],
                     job_text=job_text[:2000],
                 )
                 result = call_gemini(api_key, prompt)
@@ -343,19 +277,13 @@ def main():
 
     if result:
         st.divider()
-
-        # score
         render_score(result.get("score", 0), t_res["score_label"])
-
         st.divider()
 
-        # tópicos em colunas
         col1, col2 = st.columns(2)
-
         with col1:
             st.markdown(f"#### {t_res['section_strengths']}")
             render_list(result.get("strengths", []))
-
             st.markdown(f"#### {t_res['section_keywords']}")
             keywords = result.get("missing_keywords", [])
             st.markdown(" ".join([f"`{kw}`" for kw in keywords]))
@@ -363,12 +291,10 @@ def main():
         with col2:
             st.markdown(f"#### {t_res['section_gaps']}")
             render_list(result.get("gaps", []))
-
             st.markdown(f"#### {t_res['section_suggestions']}")
             render_list(result.get("suggestions", []))
 
         st.divider()
-
         st.markdown(f"#### {t_res['section_summary']}")
         st.info(result.get("summary", ""))
 
